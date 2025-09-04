@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>EPUB TOC Depth Mapper</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <style>
+    body { font-family: sans-serif; padding: 20px; }
+    #tocList { margin-top: 20px; }
+    ul { list-style: none; padding-left: 20px; }
+    li { margin: 2px 0; }
+  </style>
+</head>
+<body>
+  <h1>EPUB TOC Depth Mapper</h1>
+  <input type="file" id="fileInput" accept=".epub"><br><br>
+
+  <label for="depthSlider">Max Depth: <span id="depthValue">1</span></label>
+  <input type="range" id="depthSlider" min="1" max="10" value="1"><br><br>
+
+  <button id="downloadBtn" disabled>Download Modified EPUB</button>
+
+  <div id="tocList"></div>
+
+  <script>
+    let tocXML, navPoints, originalZip, tocPath;
+    let fileName = "book.epub";
+
+    function parseNavPoints(node, depth = 1) {
+      let arr = [];
+      node.querySelectorAll(":scope > navPoint").forEach(np => {
+        arr.push({
+          depth,
+          label: np.querySelector("navLabel > text")?.textContent || "Untitled",
+          src: np.querySelector("content")?.getAttribute("src") || "",
+          children: parseNavPoints(np, depth + 1)
+        });
+      });
+      return arr;
+    }
+
+    function renderTOC(toc, maxDepth) {
+      let ul = document.createElement("ul");
+      toc.forEach(item => {
+        if (item.depth <= maxDepth) {
+          let li = document.createElement("li");
+          li.textContent = item.label;
+          ul.appendChild(li);
+          if (item.children.length) {
+            li.appendChild(renderTOC(item.children, maxDepth));
+          }
+        }
+      });
+      return ul;
+    }
+
+    function rebuildTOCXML(toc, maxDepth, xmlDoc) {
+      let createNavPoint = (item, id) => {
+        let np = xmlDoc.createElement("navPoint");
+        np.setAttribute("id", "navPoint-" + id);
+        np.setAttribute("playOrder", id);
+        let label = xmlDoc.createElement("navLabel");
+        let text = xmlDoc.createElement("text");
+        text.textContent = item.label;
+        label.appendChild(text);
+        np.appendChild(label);
+        let content = xmlDoc.createElement("content");
+        content.setAttribute("src", item.src);
+        np.appendChild(content);
+
+        let childId = id + 1;
+        item.children.forEach(child => {
+          if (child.depth <= maxDepth) {
+            np.appendChild(createNavPoint(child, ++childId));
+          }
+        });
+        return np;
+      };
+
+      let newDoc = xmlDoc.cloneNode(true);
+      let navMap = newDoc.querySelector("navMap");
+      navMap.innerHTML = "";
+      let id = 1;
+      toc.forEach(item => {
+        if (item.depth <= maxDepth) {
+          navMap.appendChild(createNavPoint(item, id++));
+        }
+      });
+      return new XMLSerializer().serializeToString(newDoc);
+    }
+
+    document.getElementById("fileInput").addEventListener("change", async e => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      fileName = file.name;
+      originalZip = await JSZip.loadAsync(file);
+
+      // Locate toc.ncx
+      tocPath = Object.keys(originalZip.files).find(f => f.endsWith("toc.ncx"));
+      if (!tocPath) {
+        alert("No toc.ncx found in EPUB.");
+        return;
+      }
+
+      let text = await originalZip.file(tocPath).async("string");
+      tocXML = new DOMParser().parseFromString(text, "application/xml");
+      navPoints = parseNavPoints(tocXML.querySelector("navMap"));
+
+      let depth = parseInt(document.getElementById("depthSlider").value);
+      document.getElementById("tocList").innerHTML = "";
+      document.getElementById("tocList").appendChild(renderTOC(navPoints, depth));
+
+      document.getElementById("downloadBtn").disabled = false;
+    });
+
+    document.getElementById("depthSlider").addEventListener("input", e => {
+      let depth = parseInt(e.target.value);
+      document.getElementById("depthValue").textContent = depth;
+      if (!navPoints) return;
+      document.getElementById("tocList").innerHTML = "";
+      document.getElementById("tocList").appendChild(renderTOC(navPoints, depth));
+    });
+
+    document.getElementById("downloadBtn").addEventListener("click", async () => {
+      let depth = parseInt(document.getElementById("depthSlider").value);
+      let newXML = rebuildTOCXML(navPoints, depth, tocXML);
+
+      // Replace toc.ncx in ZIP
+      originalZip.file(tocPath, newXML);
+
+      // Generate new EPUB
+      let newBlob = await originalZip.generateAsync({ type: "blob", compression: "DEFLATE" } );
+      let a = document.createElement("a");
+      a.href = URL.createObjectURL(newBlob);
+      a.download = fileName.replace(/\.epub$/i, "_modified.epub");
+      a.click();
+    });
+  </script>
+</body>
+</html>
