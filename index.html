@@ -20,10 +20,19 @@
 
   <button id="downloadBtn" disabled>Download Modified EPUB</button>
 
-  <div id="tocList"></div>
+  <div style="display:flex; gap:50px;">
+    <div>
+      <h3>toc.ncx TOC</h3>
+      <div id="tocList"></div>
+    </div>
+    <div id="tocXHTMLContainer">
+      <h3>toc.xhtml TOC</h3>
+      <div id="tocXHTMLList"></div>
+    </div>
+  </div>
 
   <script>
-    let tocXML, navPoints, originalZip, tocPath;
+    let tocXML, navPoints, originalZip, tocPath, tocXHTMLPath, tocXHTMLDoc;
     let fileName = "book.epub";
 
     function parseNavPoints(node, depth = 1) {
@@ -48,6 +57,40 @@
           ul.appendChild(li);
           if (item.children.length) {
             li.appendChild(renderTOC(item.children, maxDepth));
+          }
+        }
+      });
+      return ul;
+    }
+
+    // Parse toc.xhtml <nav> structure into a similar tree
+    function parseTocXHTML(navElem, depth = 1) {
+      let arr = [];
+      let ol = navElem.querySelector(":scope > ol");
+      if (!ol) return arr;
+      ol.querySelectorAll(":scope > li").forEach(li => {
+        let a = li.querySelector(":scope > a");
+        let label = a ? a.textContent : "Untitled";
+        let src = a ? a.getAttribute("href") : "";
+        let children = [];
+        let subNav = li.querySelector(":scope > ol");
+        if (subNav) {
+          children = parseTocXHTML({querySelector: sel => subNav.querySelector(sel)}, depth + 1);
+        }
+        arr.push({ depth, label, src, children });
+      });
+      return arr;
+    }
+
+    function renderTocXHTMLTree(toc, maxDepth) {
+      let ul = document.createElement("ul");
+      toc.forEach(item => {
+        if (item.depth <= maxDepth) {
+          let li = document.createElement("li");
+          li.textContent = item.label;
+          ul.appendChild(li);
+          if (item.children.length) {
+            li.appendChild(renderTocXHTMLTree(item.children, maxDepth));
           }
         }
       });
@@ -89,6 +132,30 @@
       return new XMLSerializer().serializeToString(newDoc);
     }
 
+    function rebuildTOCXHTML(toc, maxDepth, xmlDoc) {
+      let newDoc = xmlDoc.cloneNode(true);
+      let nav = newDoc.querySelector('nav[epub\\:type="toc"], nav[role="doc-toc"]');
+      if (!nav) return null;
+
+      let ol = newDoc.createElement("ol");
+      toc.forEach(item => {
+        if (item.depth <= maxDepth) {
+          let li = newDoc.createElement("li");
+          let a = newDoc.createElement("a");
+          a.setAttribute("href", item.src);
+          a.textContent = item.label;
+          li.appendChild(a);
+          ol.appendChild(li);
+        }
+      });
+
+      nav.innerHTML = "";
+      nav.appendChild(ol);
+
+      return new XMLSerializer().serializeToString(newDoc);
+    }
+
+    let tocXHTMLTree = null;
     document.getElementById("fileInput").addEventListener("change", async e => {
       const file = e.target.files[0];
       if (!file) return;
@@ -107,9 +174,36 @@
       tocXML = new DOMParser().parseFromString(text, "application/xml");
       navPoints = parseNavPoints(tocXML.querySelector("navMap"));
 
+      // Locate toc.xhtml if present
+      tocXHTMLPath = Object.keys(originalZip.files).find(f => f.toLowerCase().endsWith("toc.xhtml"));
+      tocXHTMLTree = null;
+      if (tocXHTMLPath) {
+        let tocXHTMLText = await originalZip.file(tocXHTMLPath).async("string");
+        tocXHTMLDoc = new DOMParser().parseFromString(tocXHTMLText, "application/xhtml+xml");
+        // Find <nav epub:type="toc"> or <nav role="doc-toc">
+        let nav = tocXHTMLDoc.querySelector('nav[epub\\:type="toc"], nav[role="doc-toc"]');
+        if (nav) {
+          tocXHTMLTree = parseTocXHTML(nav);
+        }
+      }
+
       let depth = parseInt(document.getElementById("depthSlider").value);
       document.getElementById("tocList").innerHTML = "";
       document.getElementById("tocList").appendChild(renderTOC(navPoints, depth));
+
+      // Show toc.xhtml TOC if available
+      let tocXHTMLContainer = document.getElementById("tocXHTMLContainer");
+      if (tocXHTMLTree && tocXHTMLTree.length) {
+        tocXHTMLContainer.style.display = "block";
+        let tocXHTMLList = document.getElementById("tocXHTMLList");
+        tocXHTMLList.innerHTML = "";
+        tocXHTMLList.appendChild(renderTocXHTMLTree(tocXHTMLTree, depth));
+      } else {
+        tocXHTMLList.innerHTML = "Nothing found.";
+        if (tocXHTMLPath)
+          tocXHTMLList.innerHTML += "But the file toc.xhtml exists in the EPUB.";
+        
+      }
 
       document.getElementById("downloadBtn").disabled = false;
     });
@@ -120,6 +214,17 @@
       if (!navPoints) return;
       document.getElementById("tocList").innerHTML = "";
       document.getElementById("tocList").appendChild(renderTOC(navPoints, depth));
+
+      // Update toc.xhtml TOC if available
+      let tocXHTMLContainer = document.getElementById("tocXHTMLContainer");
+      if (tocXHTMLTree && tocXHTMLTree.length) {
+        tocXHTMLContainer.style.display = "block";
+        let tocXHTMLList = document.getElementById("tocXHTMLList");
+        tocXHTMLList.innerHTML = "";
+        tocXHTMLList.appendChild(renderTocXHTMLTree(tocXHTMLTree, depth));
+      } else {
+        tocXHTMLContainer.style.display = "none";
+      }
     });
 
     document.getElementById("downloadBtn").addEventListener("click", async () => {
@@ -129,8 +234,16 @@
       // Replace toc.ncx in ZIP
       originalZip.file(tocPath, newXML);
 
-      // Generate new EPUB
-      let newBlob = await originalZip.generateAsync({ type: "blob", compression: "DEFLATE" } );
+      // Replace toc.xhtml if present
+      if (tocXHTMLPath && tocXHTMLDoc) {
+        let newXHTML = rebuildTOCXHTML(navPoints, depth, tocXHTMLDoc);
+        if (newXHTML) {
+          originalZip.file(tocXHTMLPath, newXHTML);
+        }
+      }
+
+      // Generate new EPUB (with compression)
+      let newBlob = await originalZip.generateAsync({ type: "blob", compression: "DEFLATE" });
       let a = document.createElement("a");
       a.href = URL.createObjectURL(newBlob);
       a.download = fileName.replace(/\.epub$/i, "_modified.epub");
