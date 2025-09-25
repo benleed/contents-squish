@@ -20,19 +20,13 @@
 
   <button id="downloadBtn" disabled>Download Modified EPUB</button>
 
-  <div style="display:flex; gap:50px;">
-    <div>
-      <h3>toc.ncx TOC</h3>
-      <div id="tocList"></div>
-    </div>
-    <div id="tocXHTMLContainer">
-      <h3>toc.xhtml TOC</h3>
-      <div id="tocXHTMLList"></div>
-    </div>
+  <div>
+    <h3>toc.ncx TOC</h3>
+    <div id="tocList"></div>
   </div>
 
   <script>
-    let tocXML, navPoints, originalZip, tocPath, tocXHTMLPath, tocXHTMLDoc;
+  let tocXML, navPoints, originalZip, tocPath, tocXHTMLPath;
     let fileName = "book.epub";
 
     function parseNavPoints(node, depth = 1) {
@@ -63,39 +57,7 @@
       return ul;
     }
 
-    // Parse toc.xhtml <nav> structure into a similar tree
-    function parseTocXHTML(navElem, depth = 1) {
-      let arr = [];
-      let ol = navElem.querySelector(":scope > ol");
-      if (!ol) return arr;
-      ol.querySelectorAll(":scope > li").forEach(li => {
-        let a = li.querySelector(":scope > a");
-        let label = a ? a.textContent : "Untitled";
-        let src = a ? a.getAttribute("href") : "";
-        let children = [];
-        let subNav = li.querySelector(":scope > ol");
-        if (subNav) {
-          children = parseTocXHTML({querySelector: sel => subNav.querySelector(sel)}, depth + 1);
-        }
-        arr.push({ depth, label, src, children });
-      });
-      return arr;
-    }
 
-    function renderTocXHTMLTree(toc, maxDepth) {
-      let ul = document.createElement("ul");
-      toc.forEach(item => {
-        if (item.depth <= maxDepth) {
-          let li = document.createElement("li");
-          li.textContent = item.label;
-          ul.appendChild(li);
-          if (item.children.length) {
-            li.appendChild(renderTocXHTMLTree(item.children, maxDepth));
-          }
-        }
-      });
-      return ul;
-    }
 
     function rebuildTOCXML(toc, maxDepth, xmlDoc) {
       let createNavPoint = (item, id) => {
@@ -155,7 +117,6 @@
       return new XMLSerializer().serializeToString(newDoc);
     }
 
-    let tocXHTMLTree = null;
     document.getElementById("fileInput").addEventListener("change", async e => {
       const file = e.target.files[0];
       if (!file) return;
@@ -176,33 +137,26 @@
 
       // Locate toc.xhtml if present
       tocXHTMLPath = Object.keys(originalZip.files).find(f => f.toLowerCase().endsWith("toc.xhtml"));
-      tocXHTMLTree = null;
-      if (tocXHTMLPath) {
-        let tocXHTMLText = await originalZip.file(tocXHTMLPath).async("string");
-        tocXHTMLDoc = new DOMParser().parseFromString(tocXHTMLText, "application/xhtml+xml");
-        // Find <nav epub:type="toc"> or <nav role="doc-toc">
-        let nav = tocXHTMLDoc.querySelector('nav[epub\\:type="toc"], nav[role="doc-toc"]');
-        if (nav) {
-          tocXHTMLTree = parseTocXHTML(nav);
-        }
-      }
 
       let depth = parseInt(document.getElementById("depthSlider").value);
       document.getElementById("tocList").innerHTML = "";
       document.getElementById("tocList").appendChild(renderTOC(navPoints, depth));
 
-      // Show toc.xhtml TOC if available
-      let tocXHTMLContainer = document.getElementById("tocXHTMLContainer");
-      if (tocXHTMLTree && tocXHTMLTree.length) {
-        tocXHTMLContainer.style.display = "block";
-        let tocXHTMLList = document.getElementById("tocXHTMLList");
-        tocXHTMLList.innerHTML = "";
-        tocXHTMLList.appendChild(renderTocXHTMLTree(tocXHTMLTree, depth));
+      // Show warning if toc.xhtml will be deleted
+      let warningDiv = document.getElementById("tocXHTMLWarning");
+      if (!warningDiv) {
+        warningDiv = document.createElement("div");
+        warningDiv.id = "tocXHTMLWarning";
+        warningDiv.style.color = "#b85c00";
+        warningDiv.style.marginTop = "15px";
+        document.body.insertBefore(warningDiv, document.getElementById("downloadBtn"));
+      }
+      if (tocXHTMLPath) {
+        warningDiv.textContent = "Note: toc.xhtml exists in this EPUB and will be deleted when you download the modified file.";
+        warningDiv.style.display = "block";
       } else {
-        tocXHTMLList.innerHTML = "Nothing found.";
-        if (tocXHTMLPath)
-          tocXHTMLList.innerHTML += "But the file toc.xhtml exists in the EPUB.";
-        
+        warningDiv.textContent = "";
+        warningDiv.style.display = "none";
       }
 
       document.getElementById("downloadBtn").disabled = false;
@@ -214,17 +168,6 @@
       if (!navPoints) return;
       document.getElementById("tocList").innerHTML = "";
       document.getElementById("tocList").appendChild(renderTOC(navPoints, depth));
-
-      // Update toc.xhtml TOC if available
-      let tocXHTMLContainer = document.getElementById("tocXHTMLContainer");
-      if (tocXHTMLTree && tocXHTMLTree.length) {
-        tocXHTMLContainer.style.display = "block";
-        let tocXHTMLList = document.getElementById("tocXHTMLList");
-        tocXHTMLList.innerHTML = "";
-        tocXHTMLList.appendChild(renderTocXHTMLTree(tocXHTMLTree, depth));
-      } else {
-        tocXHTMLContainer.style.display = "none";
-      }
     });
 
     document.getElementById("downloadBtn").addEventListener("click", async () => {
@@ -234,12 +177,9 @@
       // Replace toc.ncx in ZIP
       originalZip.file(tocPath, newXML);
 
-      // Replace toc.xhtml if present
-      if (tocXHTMLPath && tocXHTMLDoc) {
-        let newXHTML = rebuildTOCXHTML(navPoints, depth, tocXHTMLDoc);
-        if (newXHTML) {
-          originalZip.file(tocXHTMLPath, newXHTML);
-        }
+      // Remove toc.xhtml if present
+      if (tocXHTMLPath) {
+        originalZip.remove(tocXHTMLPath);
       }
 
       // Generate new EPUB (with compression)
